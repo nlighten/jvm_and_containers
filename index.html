@@ -1,0 +1,591 @@
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>JVM container awareness</title>
+    <meta charset="utf-8" />
+
+    <script src="https://code.jquery.com/jquery-2.2.4.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.12.1/jquery-ui.min.js"></script>
+
+    <style>
+      @import url(https://fonts.googleapis.com/css?family=Droid+Serif);
+      @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+
+      body {
+        font-family: 'Droid Serif';
+        font-size: medium;
+      }
+      h1, h2, h3 {
+        font-family: 'Yanone Kaffeesatz';
+        font-weight: 400;
+        margin-bottom: 0;
+      }
+      .small * {
+        font-size: small !important;
+      }
+      code {
+        border-radius: 5px;
+      }
+      .inverse {
+        background: #272822;
+        color: #777872;
+        text-shadow: 0 0 20px #333;
+      }
+      .inverse h1, .inverse h2 {
+        color: #f3f3f3;
+        line-height: 0.8em;
+      }
+      .footnote {
+        position: absolute;
+        font-size: small;
+        bottom: 3em;
+        right: 3em;
+      }
+      /* styling only necessary for displaying source */
+      #source {
+        position: absolute;
+        display: none;
+        font-family: monospace;
+        font-size: medium;
+        background: #333333;
+        color: white;
+        padding: 10px;
+        text-align: left;
+        width: 65%;
+        height: 70%;
+        z-index: 1000;
+      }
+      #overlay {
+        position: absolute;
+        display: none;
+        background: black;
+        width: 100%;
+        height: 100%;
+        opacity: 0.2;
+        z-index: 999;
+      }
+    </style>
+  </head>
+  <body>
+    <textarea id="source" readonly>
+class: center, middle, inverse
+
+# The JVM and containers: 
+# a perfect match?
+
+
+
+richard.swart-at-nlighten.nl
+---
+
+# We will look at
+
+
+Resources:
+  * Memory     
+  * CPU
+
+Using my laptop as reference:
+
+* 32 GB  
+* 4 cores
+
+Software:
+* OpenJDK 11.0.5
+* Docker 17.05.0-ce
+* K3S v1.17.0+k3s.1 (Containerd)
+
+---
+# Test application
+
+```java
+public class SystemInfo {
+
+  public static void main(String[] args) {
+    long heapSize = Runtime.getRuntime().totalMemory(); 
+    long heapMaxSize = Runtime.getRuntime().maxMemory();
+    long heapFreeSize = Runtime.getRuntime().freeMemory(); 
+
+    System.out.println("cur heapsize         : " + formatSize(heapSize));
+    System.out.println("max heapsize         : " + formatSize(heapMaxSize));
+    System.out.println("free heapsize        : " + formatSize(heapFreeSize));
+    System.out.println("available processors : " + Runtime.getRuntime().availableProcessors());
+  }
+
+
+  public static String formatSize(long v) {
+    if (v < 1024) return v + " B";
+    int z = (63 - Long.numberOfLeadingZeros(v)) / 10;
+    return String.format("%.1f %sB", (double)v / (1L << (z*10)), " KMGTPE".charAt(z));
+  }
+}```
+
+
+---
+# Directly on host I
+
+
+We usually start a java program like this:
+
+```yaml
+$ java -Xms256m -Xmx256m SystemInfo 
+```
+
+Output:
+```yaml
+cur heapsize         : 256.0 MB
+max heapsize         : 256.0 MB
+free heapsize        : 254.7 MB
+available processors : 4
+```
+
+What would happen if we don't pass heap size params?
+---
+# Directly on host II
+
+Let's try:
+```yaml
+$ java SystemInfo 
+```
+
+Output:
+```yaml
+cur heapsize         : 504.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 501.9 MB
+available processors : 4
+```
+
+
+Since we did not pass any heap size params the JVM decided for us. How? 
+
+
+---
+# Directly on host III
+
+Check JVM flags
+
+```yaml
+java -XX:+PrintFlagsFinal SystemInfo \
+| grep -E " InitialRAMPercentage | MaxRAMPercentage | MinRAMPercentage"
+```
+
+Output:
+```yaml
+   double InitialRAMPercentage                      = 1.562500                            {product}
+   double MaxRAMPercentage                          = 25.000000                           {product}
+   double MinRAMPercentage                          = 50.000000                           {product}
+```
+
+
+
+* InitialRAMPercentage is used to calculate initial heap size when InitialHeapSize / -Xms is not set.
+
+* For systems with small physical memory MaxHeapSize is set at:
+
+```
+        phys_mem * MinRAMPercentage / 100  (if < 96M)
+```
+
+* Otherwise MaxHeapSize is aet at:
+
+```
+        MAX(phys_mem * MaxRAMPercentage / 100, 96M)
+```
+
+---
+# Docker I
+
+With explicit heap size:
+```yaml
+docker run --rm -e "JAVA_OPTS=-Xms256m -Xmx256m" localhost:5000/sys-info
+```
+
+Output:
+```yaml
+cur heapsize         : 256.0 MB
+max heapsize         : 256.0 MB
+free heapsize        : 254.7 MB
+available processors : 4
+
+```
+
+Identical as on the host.
+
+---
+# Docker II
+
+No heap size params:
+```yaml
+docker run --rm localhost:5000/sys-info
+```
+
+Output:
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 4
+```
+
+Identical as on the host.
+
+
+---
+# Kubernetes I 
+
+With explicit heap size:
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --env="JAVA_OPTS=-Xms256m -Xmx256m"
+```
+
+Output:
+```yaml
+cur heapsize         : 247.5 MB
+max heapsize         : 247.5 MB
+free heapsize        : 246.1 MB
+available processors : 1
+```
+
+
+So on K8S I get:
+* slightly less memory allocated 
+* but only 1 cpu
+
+
+
+???????
+
+---
+# Kubernetes II 
+
+No heap size param:
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never
+```
+
+Output:
+```yaml
+cur heapsize         : 483.4 MB
+max heapsize         : 7.6 GB
+free heapsize        : 475.4 MB
+available processors : 1
+```
+
+Same pattern :
+* 'slightly' less memory 
+* only 1 cpu
+
+---
+
+# Kubernetes III
+
+Let's add some debug logging:
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --env="JAVA_OPTS=-Xlog:container=trace"
+```
+
+Output:
+```yaml
+[0.139s][trace][os,container] Path to /cpu.cfs_quota_us is /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_quota_us
+[0.139s][trace][os,container] CPU Quota is: -1
+[0.139s][trace][os,container] Path to /cpu.cfs_period_us is /sys/fs/cgroup/cpu,cpuacct/cpu.cfs_period_us
+[0.139s][trace][os,container] CPU Period is: 100000
+[0.139s][trace][os,container] Path to /cpu.shares is /sys/fs/cgroup/cpu,cpuacct/cpu.shares
+[0.139s][trace][os,container] CPU Shares is: 2
+[0.139s][trace][os,container] CPU Share count based on shares: 1
+[0.139s][trace][os,container] OSContainer::active_processor_count: 1
+[0.142s][trace][os,container] Path to /memory.limit_in_bytes is /sys/fs/cgroup/memory/memory.limit_in_bytes
+[0.142s][trace][os,container] Memory Limit is: 9223372036854771712
+[0.142s][trace][os,container] Memory Limit is: Unlimited
+[0.142s][debug][os,container] container memory limit unlimited: -1, using host value
+```
+
+Ok, so it is using cgroup information. But why the difference with a plain Docker container?
+
+
+
+---
+# CPU limiting inside a container
+
+There are three ways a Linux container can have its CPU limited:
+
+* **cpu_shares**. A relative figure that gives the container a share of the CPU.
+* **cpu_limit**. A hard CPU time that can be used per cpu_period. 
+* **cpu_sets**. Run the container on specific CPU's.
+
+
+
+
+
+By default:
+* Docker sets no limit and CPU shares to 1024
+* K8S sets no limit and CPU shares to 2
+
+
+---
+# How the JVM counts CPU's inside a container
+
+From JDK source code:
+```yaml
+* Algorithm:
+ *
+ * If user specified a quota (quota != -1), calculate the number of
+ * required CPUs by dividing quota by period.
+ *
+ * If shares are in effect (shares != -1), calculate the number
+ * of CPUs required for the shares by dividing the share value
+ * by PER_CPU_SHARES.
+ *
+ * All results of division are rounded up to the next whole number.
+ *
+ * If neither shares or quotas have been specified, return the
+ * number of active processors in the system.
+ *
+ * If both shares and quotas have been specified, the results are
+ * based on the flag PreferContainerQuotaForCPUCount.  If true,
+ * return the quota value.  If false return the smallest value
+ * between shares or quotas.
+ *
+ * If shares and/or quotas have been specified, the resulting number
+ * returned will never exceed the number of active processors.
+ ```
+
+---
+# But there is a snag!
+
+Again from JDK source code:
+```yaml
+/* cpu_shares
+ *
+ * Return the amount of cpu shares available to the process
+ *
+ * return:
+ *    Share number (typically a number relative to 1024)
+ *                 (2048 typically expresses 2 CPUs worth of processing)
+ *    -1 for no share setup
+ *    OSCONTAINER_ERROR for not supported
+ */
+int OSContainer::cpu_shares() {
+  GET_CONTAINER_INFO(int, cpu, "/cpu.shares",
+                     "CPU Shares is: %d", "%d", shares);
+  // Convert 1024 to no shares setup
+  if (shares == 1024) return -1;
+
+  return shares;
+}
+ ```
+They made the Docker default of 1024 cpu_shares equivalent to unlimited!
+
+
+---
+# Leading to weird behavior
+
+
+The following gives 'all' cpu's:
+```yaml
+docker run --rm --cpu-shares=1024 sys-info
+```
+
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 4
+```
+
+But doubling CPU shares only gives me 2!
+
+```yaml
+docker run --rm --cpu-shares=2048 sys-info
+```
+
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 2
+
+```
+
+---
+# Similar on K8S
+
+
+The following gives 'all' cpu's:
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --requests="cpu=1.0"
+```
+
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 4
+```
+
+But doubling CPU requests only gives me 2.
+
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --requests="cpu=2.0"
+```
+
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 2
+
+```
+
+---
+# What if I use limits on K8S
+
+
+Limiting the CPU to max 1 gives:
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --limits="cpu=1.0"
+```
+
+```yaml
+cur heapsize         : 483.4 MB
+max heapsize         : 7.6 GB
+free heapsize        : 475.4 MB
+available processors : 1
+```
+
+Limiting the CPU to max 2 gives:
+
+```yaml
+kubectl run sysinfo-container --generator=run-pod/v1 --image=localhost:5000/sys-info --restart=Never --limits="cpu=2.0"
+```
+
+```yaml
+cur heapsize         : 500.0 MB
+max heapsize         : 7.8 GB
+free heapsize        : 498.1 MB
+available processors : 2
+
+```
+
+So `--limits` gives a predictable number of CPUs but ......... you probably don't want to set them.  
+
+---
+# Limits problems
+
+1. CPU CFS quota often leads to latency.
+2. Memory limits can lead to OOMKill behavior 
+
+and specifically on K8S:
+
+3. Less density due to limits >> requests
+
+---
+# Quality of Service (QoS) on K8S
+
+
+Three types of QoS for pods:
+ 
+ * __Guaranteed__: all containers of the pod have limits==requests
+ * __Burstable__: some containers of the pod have limits > requests
+ * __ BestEffort__: none of the containers have request/limits set
+
+
+
+```yaml
+kubectl describe pod sysinfo-container
+```
+
+```yaml
+.....
+    Limits:
+      cpu:     2
+      memory:  256Mi
+    Requests:
+      cpu:        2
+      memory:     128Mi
+.....
+QoS Class:       Burstable
+```
+
+---
+# Overcommit on K8S
+
+Overcommit: Limits > Request (Burstable)
+
+
+__For CPU__: fine, completely fair scheduling
+
+__For memory__: fine, as long as demand <  node capacity
+
+
+If the latter condition is not met you may see unpredictable OOMKiller action.
+
+---
+# Rule of thumb for running a JVM on K8S?
+
+For a generic K8S cluster targeted at good density:
+
+__Memory:__
+* Don't overcommit memory, so `requests.memory=limits.memory`
+* Set max heap size equal to half container memory, so `Xms=Xmx=1/2*requests.memory`, or probably better:
+* Don´t set max heap but set `-XX:MaxRAMPercentage=50.0  -XX:InitialRAMPercentage=50.0` 
+
+__CPU:__
+* Disable CFS quota (`--cpu-cfs-quota=false`) if you can 
+* Don't set CPU limits
+* Set `-XX:ActiveProcessorCount=xx` for each JVM to a sensible number (e.g. 2)
+
+
+
+---
+# Cloud Foundry Java Buildpack Memory Calculator
+
+Go executable that calculates memory settings based on:
+
+* Total available memory
+* Estimated loaded class count (35% of classes found on classpath)
+* Thread count (stack)
+* Head room
+
+
+Can be used in an entrypoint script to calculate your memory settings:
+
+```yaml
+docker run -it --rm  -m 1G memcalc
+INFO - input for memory calculator: -head-room=10 --jvm-options='' --loaded-class-count=10769 --thread-count=250 --total-memory 1073741824B
+INFO - resulting MEMORY_OPTS: -XX:MaxDirectMemorySize=10M -XX:MaxMetaspaceSize=74668K -XX:ReservedCodeCacheSize=240M -Xss1M -Xmx357050K
+```
+
+
+
+
+ ......
+
+
+
+
+    </textarea>
+
+    <script src="./js/remark-latest.min.js"></script>
+    <script type="text/javascript">
+      var hljs = remark.highlighter.engine;
+    </script>
+    <script src="./js/terminal.language.js" type="text/javascript"></script>
+    <script type="text/javascript">
+      var slideshow = remark.create({
+        highlightStyle: 'monokai'
+      });
+      // extract the embedded styling from ansi spans
+      $('code.terminal span.hljs-ansi').replaceWith(function(i, x) {
+        return x.replace(/&lt;(\/?(\w+).*?)&gt;/g, '<$1>')
+      });
+    </script>
+
+  </body>
+</html>
+
+<!--
+  vim:filetype=markdown
+-->
